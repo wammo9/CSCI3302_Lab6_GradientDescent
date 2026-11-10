@@ -177,7 +177,17 @@ def get_waypoints(block_world, bin_world):
         dict with keys: 'above_block', 'at_block', 'above_bin'
         Each value is a list [x, y, z] in world frame.
     """
-    raise NotImplementedError("TODO: Implement get_waypoints()")
+    bx, by, bz = block_world
+    gx, gy, gz = bin_world
+
+    APPROACH = 0.15   # hover height above the block
+    DROP     = 0.15   # height above the bin floor to release
+
+    return {
+        'above_block': [bx, by, bz + APPROACH],
+        'at_block':    [bx, by, bz],
+        'above_bin':   [gx, gy, gz + DROP],
+    }
 
 
 # ============================================================
@@ -200,7 +210,21 @@ def gradient_descent_ik(target_world, q_init, learning_rate,
         converged  : bool
         errors     : list of position error at each iteration
     """
-    raise NotImplementedError("TODO: Implement gradient_descent_ik()")
+
+    target_base = world_to_base(target_world)
+    q = np.array(q_init, dtype=float)
+    errors = []
+    for i in range(max_iterations):
+        current_pos = forward_kinematics(q)
+        error = target_base - current_pos
+        error_distance = np.linalg.norm(error)
+        errors.append(error_distance)
+        if error_distance < tolerance:
+            return q, True, errors
+        jacobian = compute_jacobian(q)
+        q = q + learning_rate * jacobian.T @ error
+        q = np.clip(q, -np.pi * 2, np.pi * 2)
+    return q, False, errors
 
 
 # ============================================================
@@ -222,18 +246,18 @@ def pick_and_place(arm, block_world, bin_world):
 # so it has to be modified
 def main():
     # just a test for the forward kinematics portion of the report
-    #global ROBOT_POS
-    #robot = Supervisor()
-    #arm = UR5eInterface(robot)
-    #ROBOT_POS = np.array(robot.getSelf().getPosition())
+    # global ROBOT_POS
+    # robot = Supervisor()
+    # arm = UR5eInterface(robot)
+    # ROBOT_POS = np.array(robot.getSelf().getPosition())
 
-    #for q in configs:
-        #q = np.array(q)
-        #fk_base = forward_kinematics(q) 
-        #fk_world = base_to_world(fk_base)      
-        #print(q, fk_base, fk_world)
-        #arm.move_to(q, 3.0)
-        #arm.wait(5.0)
+    # for q in configs:
+    #     q = np.array(q)
+    #     fk_base = forward_kinematics(q) 
+    #     fk_world = base_to_world(fk_base)      
+    #     print(q, fk_base, fk_world)
+    #     arm.move_to(q, 3.0)
+    #     arm.wait(5.0)
     # end of test
     
     raise NotImplementedError("TODO: Implement main() to run the pick-and-place demo.")
