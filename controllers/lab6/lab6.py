@@ -114,8 +114,27 @@ def forward_kinematics(q):
     Returns:
         position : numpy array [x, y, z] in robot base frame
     """
-    raise NotImplementedError("TODO: Implement forward_kinematics()")
+    # Chain the 6 DH transforms using the provided _dh() function
+    # and the UR5e DH parameters.
+    T = np.eye(4)
+    for i in range(6):
+        T = T @ _dh(UR5E_DH_A[i], UR5E_DH_D[i], UR5E_DH_ALPHA[i], q[i])
 
+    # Apply the tool offset (GRIPPER_OFFSET = 0.18 m) as a translation
+    # along the local Z-axis of the final frame.
+    T_tool = np.eye(4)
+    T_tool[2, 3] = GRIPPER_OFFSET
+    T = T @ T_tool
+
+    # Return the XYZ position: first 3 elements of the last column.
+    return T[:3, 3]
+
+# For FK verification:
+configs = [
+    [0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0],   # HOME
+    [0.5, -1.5708, 1.5708, -1.5708, -1.5708, 0.0],   # shoulder pan rotated
+    [0.0, -1.0,    1.0,    -1.5708, -1.5708, 0.0],   # shoulder lift + elbow changed
+]
 
 # ============================================================
 # TASK 2: Numerical Jacobian (15 pts)
@@ -131,8 +150,16 @@ def compute_jacobian(q, delta=1e-5):
     Returns:
         J : numpy array (3, 6)
     """
-    # TODO: Implement (~8-10 lines)
-    raise NotImplementedError("TODO: Implement compute_jacobian()")
+    q = np.array(q, dtype=float)
+    J = np.zeros((3, 6))
+    # for each of the 6 joints,
+    for i in range(6):
+        # perturb q[i] by plus or minus delta
+        e_i = np.zeros(6)
+        e_i[i] = delta
+        # evaluate FK and compute the partial derivative
+        J[:, i] = (forward_kinematics(q + e_i) - forward_kinematics(q - e_i)) / (2 * delta)
+    return J
 
 
 # ============================================================
@@ -191,7 +218,24 @@ def pick_and_place(arm, block_world, bin_world):
 # ============================================================
 # MAIN — DO NOT MODIFY
 # ============================================================
+# lol not sure why it says DO NOT MODIFY and then there is a TODO
+# so it has to be modified
 def main():
+    # just a test for the forward kinematics portion of the report
+    #global ROBOT_POS
+    #robot = Supervisor()
+    #arm = UR5eInterface(robot)
+    #ROBOT_POS = np.array(robot.getSelf().getPosition())
+
+    #for q in configs:
+        #q = np.array(q)
+        #fk_base = forward_kinematics(q) 
+        #fk_world = base_to_world(fk_base)      
+        #print(q, fk_base, fk_world)
+        #arm.move_to(q, 3.0)
+        #arm.wait(5.0)
+    # end of test
+    
     raise NotImplementedError("TODO: Implement main() to run the pick-and-place demo.")
 
 
