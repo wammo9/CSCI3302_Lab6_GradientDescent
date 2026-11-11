@@ -180,8 +180,8 @@ def get_waypoints(block_world, bin_world):
     bx, by, bz = block_world
     gx, gy, gz = bin_world
 
-    APPROACH = 0.15   # hover height above the block
-    DROP     = 0.15   # height above the bin floor to release
+    APPROACH = 0.15   # above the block a little
+    DROP     = 0.15   # same height above the bin
 
     return {
         'above_block': [bx, by, bz + APPROACH],
@@ -235,32 +235,41 @@ def pick_and_place(arm, block_world, bin_world):
     Pick up the block and place it in the bin.
 
     """
-    # TODO: Implement 
-    raise NotImplementedError("TODO: Implement pick_and_place()")
+    waypoints = get_waypoints(block_world, bin_world)
+    solutions = {}
+    q_start = np.array(HOME)
+    for name, position in waypoints.items():
+        q, converged, errors = gradient_descent_ik(position, q_start, 0.5, 1000, 0.005)
+        if not converged:
+            raise RuntimeError(f"IK failed for {name}: final error {errors[-1]:.4f} m")
+        solutions[name] = q
+        q_start = q
+    # Now the flow
+    arm.open_gripper()
+    arm.move_to(solutions["above_block"], 3.0)
+    arm.move_to(solutions["at_block"], 2.0)
+    arm.close_gripper()
+    arm.wait(1.0)
+    arm.move_to(solutions["above_block"], 2.0)
+    arm.move_to(solutions["above_bin"], 3.0)
+    arm.open_gripper()
+    arm.wait(20.0)
+
+
 
 
 # ============================================================
 # MAIN — DO NOT MODIFY
 # ============================================================
-# lol not sure why it says DO NOT MODIFY and then there is a TODO
-# so it has to be modified
 def main():
-    # just a test for the forward kinematics portion of the report
-    # global ROBOT_POS
-    # robot = Supervisor()
-    # arm = UR5eInterface(robot)
-    # ROBOT_POS = np.array(robot.getSelf().getPosition())
-
-    # for q in configs:
-    #     q = np.array(q)
-    #     fk_base = forward_kinematics(q) 
-    #     fk_world = base_to_world(fk_base)      
-    #     print(q, fk_base, fk_world)
-    #     arm.move_to(q, 3.0)
-    #     arm.wait(5.0)
-    # end of test
-    
-    raise NotImplementedError("TODO: Implement main() to run the pick-and-place demo.")
+    global ROBOT_POS
+    robot = Supervisor()
+    arm = UR5eInterface(robot)
+    ROBOT_POS = np.array(robot.getSelf().getPosition())
+    arm.wait(1.0) # Wait for block to fall
+    block_world = robot.getFromDef("BLOCK").getPosition()
+    bin_world   = robot.getFromDef("BIN").getPosition()
+    pick_and_place(arm, block_world, bin_world)
 
 
 if __name__ == "__main__":
