@@ -1,6 +1,11 @@
 import numpy as np
 import sys
 
+# ============================================================
+# TASK SWITCH: "pick_and_place" (lab6.wbt) or "block_stack" (lab6_extra.wbt)
+# ============================================================
+Task = "pick_and_place"
+
 try:
     from controller import Supervisor
 except ImportError:
@@ -194,7 +199,7 @@ def get_waypoints(block_world, bin_world):
 # TASK 4: Gradient Descent IK (20 pts)
 # ============================================================
 def gradient_descent_ik(target_world, q_init, learning_rate,
-                         max_iterations, tolerance):
+                         max_iterations, tolerance, vertical=False, gripper_yaw=0.0):
     """
     Find joint angles that place the gripper at target_world.
 
@@ -204,6 +209,8 @@ def gradient_descent_ik(target_world, q_init, learning_rate,
         learning_rate  : step size (default 0.5)
         max_iterations : max steps (default 1000)
         tolerance      : converge when error < this (meters)
+        vertical       : stacking only; keep the gripper pointing down with fixed yaw
+        gripper_yaw    : rotation about world vertical (radians), when vertical=True
 
     Returns:
         q_solution : numpy array of 6 joint angles
@@ -213,6 +220,15 @@ def gradient_descent_ik(target_world, q_init, learning_rate,
 
     target_base = world_to_base(target_world)
     q = np.array(q_init, dtype=float)
+    if vertical:
+        # The last wrist joint adds yaw without changing the downward tool axis
+        # or tip position. Its sign is reversed because the tool points down.
+        # Only q0, q1, q2 are free; the other joints maintain this tool pose.
+        joint_map = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1],
+                              [0, -1, -1], [0, 0, 0], [1, 0, 0]])
+        q[3] = -np.pi / 2 - q[1] - q[2]
+        q[4] = -np.pi / 2
+        q[5] = q[0] - gripper_yaw
     errors = []
     for i in range(max_iterations):
         current_pos = forward_kinematics(q)
@@ -222,8 +238,20 @@ def gradient_descent_ik(target_world, q_init, learning_rate,
         if error_distance < tolerance:
             return q, True, errors
         jacobian = compute_jacobian(q)
-        q = q + learning_rate * jacobian.T @ error
-        q = np.clip(q, -np.pi * 2, np.pi * 2)
+        if vertical:
+            # Chain rule: account for the wrist compensating for shoulder/elbow
+            # motion. Setting wrist angles AFTER ordinary IK would miss the target.
+            update = joint_map @ (learning_rate * (jacobian @ joint_map).T @ error)
+            scale = 1.0
+            for angle, change in zip(q, update):
+                if change > 0:
+                    scale = min(scale, (2 * np.pi - angle) / change)
+                elif change < 0:
+                    scale = min(scale, (-2 * np.pi - angle) / change)
+            q += max(0.0, scale) * update
+        else:
+            q = q + learning_rate * jacobian.T @ error
+            q = np.clip(q, -np.pi * 2, np.pi * 2)
     return q, False, errors
 
 
@@ -259,6 +287,97 @@ def pick_and_place(arm, block_world, bin_world):
 
 
 # ============================================================
+# EXTRA CREDIT: Block Stacking
+# ============================================================
+BLOCK_SIZE = 0.05
+STACK_GRASP_OFFSET = 0.015  # grip 15 mm above center, 10 mm below the block's top
+STACK_GRIPPER_YAW = np.deg2rad(45.0)  # diagonal grip: paired fingers straddle a corner
+STACK_APPROACH_CLEARANCE = 0.08  # 15 cm above the fourth block exceeds vertical-pose reach
+# Stack order from bottom to top. Gray is placed first (bottom),
+# so the finished stack reads red -> blue -> green -> gray from the top down.
+STACK_ORDER = ["GRAY_BLOCK", "GREEN_BLOCK", "BLUE_BLOCK", "RED_BLOCK"]
+
+
+def _stack_move_to(arm, q, wait_time):
+    """Synchronize joint arrival so the wrist compensates throughout a move."""
+    delta = np.abs(np.array(q) - arm.get_joint_positions())
+    duration = max(wait_time, float(np.max(delta)) / 0.7)
+    # Equal joint speeds let small wrist rotations finish before larger shoulder
+    # rotations. Proportional speeds keep the downward pose during travel too.
+    for motor, change in zip(arm.motors, delta):
+        motor.setVelocity(max(float(change) / duration, 0.001))
+    actual = arm.move_to(q, duration + 0.2)
+    arm.set_speed(1.0)
+    return actual
+
+
+def _stack_vertical_move(arm, target, label):
+    """Lower/lift along a Cartesian line instead of a curved joint-space path."""
+    q = arm.get_joint_positions()
+    start = base_to_world(forward_kinematics(q))
+    target = np.array(target, dtype=float)
+    steps = max(1, int(np.ceil(np.linalg.norm(target - start) / 0.01)))
+    for step in range(1, steps + 1):
+        position = start + (target - start) * step / steps
+        q, converged, errors = gradient_descent_ik(position, q, 0.5, 8000, 0.001,
+                                                  vertical=True, gripper_yaw=STACK_GRIPPER_YAW)
+        if not converged:
+            raise RuntimeError(f"IK failed for {label}: final error {errors[-1]:.4f} m")
+        q = _stack_move_to(arm, q, 0.15)
+
+
+def block_stack(arm, robot):
+    """
+    Stack the four blocks on the STACK_ZONE using the same IK solver
+    and waypoint helper as pick_and_place().
+    """
+    zone = np.array(robot.getFromDef("STACK_ZONE").getPosition())
+    q_start = np.array(HOME)
+
+    for level, name in enumerate(STACK_ORDER):
+        block_world = robot.getFromDef(name).getPosition()
+        # Block-center height this block should end up at in the stack
+        place_world = [zone[0], zone[1], zone[2] + BLOCK_SIZE / 2 + level * BLOCK_SIZE + 0.005]
+
+        # Grip near the top; retain the same tip-to-block height when placing.
+        grasp_world = np.array(block_world) + [0, 0, STACK_GRASP_OFFSET]
+        place_tip = np.array(place_world) + [0, 0, STACK_GRASP_OFFSET]
+        # Reuse get_waypoints: 'above_bin' is the position above the stack
+        waypoints = get_waypoints(grasp_world, place_tip)
+        waypoints['above_bin'] = place_tip + [0, 0, STACK_APPROACH_CLEARANCE]
+        waypoints['at_place'] = place_tip
+
+        solutions = {}
+        for key in ['above_block', 'at_block', 'above_bin', 'at_place']:
+            q, converged, errors = gradient_descent_ik(waypoints[key], q_start, 0.5,
+                                                      8000, 0.001, vertical=True,
+                                                      gripper_yaw=STACK_GRIPPER_YAW)
+            if not converged:
+                raise RuntimeError(f"IK failed for {name} {key}: final error {errors[-1]:.4f} m")
+            solutions[key] = q
+            q_start = q
+
+        # Pick
+        arm.open_gripper()
+        _stack_move_to(arm, solutions["above_block"], 3.0)
+        _stack_vertical_move(arm, waypoints["at_block"], f"{name} lower to pickup")
+        arm.close_gripper()
+        arm.wait(1.0)
+        _stack_vertical_move(arm, waypoints["above_block"], f"{name} lift")
+        # Place on the stack
+        _stack_move_to(arm, solutions["above_bin"], 3.0)
+        _stack_vertical_move(arm, waypoints["at_place"], f"{name} lower onto stack")
+        arm.open_gripper()
+        arm.wait(1.0)
+        _stack_vertical_move(arm, waypoints["above_bin"], f"{name} retreat")
+        # Start the next block from the actual retreat pose, not at_place.
+        q_start = arm.get_joint_positions()
+
+    arm.move_to(np.array(HOME), 3.0)
+    arm.wait(5.0)
+
+
+# ============================================================
 # MAIN — DO NOT MODIFY
 # ============================================================
 def main():
@@ -267,6 +386,9 @@ def main():
     arm = UR5eInterface(robot)
     ROBOT_POS = np.array(robot.getSelf().getPosition())
     arm.wait(1.0) # Wait for block to fall
+    if Task == "block_stack":
+        block_stack(arm, robot)
+        return
     block_world = robot.getFromDef("BLOCK").getPosition()
     bin_world   = robot.getFromDef("BIN").getPosition()
     pick_and_place(arm, block_world, bin_world)
